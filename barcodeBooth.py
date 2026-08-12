@@ -3,6 +3,7 @@ import pygame
 import csv
 import os
 import io
+import shutil
 import numpy as np
 from PIL import Image
 from picamera2 import Picamera2
@@ -13,8 +14,11 @@ os.environ["SDL_MOUSE_TOUCH_EVENTS"] = "1"
 # ==========================================
 # KONFIGURATION
 # ==========================================
-CSV_FILE = os.path.expanduser("~/barcodes.csv")
-SAVE_DIR = os.path.expanduser("~/Pictures/fotobox_custom")
+# ANPASSEN: Pfad zu deinem USB-Stick (z.B. /media/pi/INTENSO oder ähnlich)
+USB_DRIVE = "/media/benjamin/FOTOBOX" 
+
+CSV_FILE = os.path.join(USB_DRIVE, "barcodes.csv")
+SAVE_DIR = os.path.join(USB_DRIVE, "fotobox_custom")
 OVERLAY_IMG = os.path.expanduser("~/mein_overlay.png")
 ZOOM_FILE = os.path.expanduser("~/fotobox_zoom.txt")
 RES_FILE = os.path.expanduser("~/fotobox_res.txt") 
@@ -32,6 +36,30 @@ RESOLUTIONS = [
     (1200, 1600), # Stufe 4: Hoch
     (1458, 1944)  # Stufe 5: Maximal
 ]
+
+# ==========================================
+# TEXTBAUSTEINE
+# ==========================================
+TEXT_WELCOME         = "Willkommen!\n\nScanne den Barcode auf deinem Schüler:innenausweis ein,\num die Fotobox zu starten.\n\nBeachte, dass die Aufnahme zwar wiederholen,\n aber nicht abbrechen kannst.\n\nBei unangemessenen Bildern behalten wir uns vor,\ndein bisheriges Foto erneut zu verwenden."
+TEXT_CODE_ACCEPTED   = "Code {} erkannt!\nMach dich bereit..."
+TEXT_CODE_INVALID    = "Gelesen: {}\nUngültig oder schon benutzt!\n\nBeachte nur die Jahrgänge 8 und 11\nkönnen die Fotos aktualisieren.\n\nDu denkst das ist ein Fehler?\nScanne erneut oder sprich Herrn Lemmer an."
+
+TEXT_MANUAL_START    = "Manuelle Eingabe:\nBitte Nummer tippen und Enter drücken."
+TEXT_MANUAL_INPUT    = "Manuelle Eingabe:\n{}"
+TEXT_MANUAL_ACCEPTED = "Manuelle Eingabe [{}] bestätigt!\nMach dich bereit..."
+
+TEXT_SAVING          = "Bild wird gespeichert..."
+TEXT_DONE            = "Fertig!\nVielen Dank."
+TEXT_RETAKE_MSG      = "Neuer Versuch..."
+TEXT_ERROR           = "Fehler bei der Bildanzeige."
+TEXT_SHUTDOWN        = "System fährt herunter...\nBitte warten." # NEU: Shutdown Text
+
+# Button-Texte (nach der Aufnahme)
+BTN_RETAKE           = "Neuaufnahme"
+BTN_SAVE             = "Speichern"
+
+# Text im Kamera-Einstellungsmenü
+TEXT_MENU_SAVE       = "Z: Speichern & Beenden"
 
 # ==========================================
 # INITIALISIERUNG PYGAME
@@ -98,40 +126,28 @@ def save_res_idx(idx):
 picam2 = Picamera2()
 
 def apply_zoom(cam2, zoom_factor):
-    """
-    Fragt dynamisch die echten Hardware-Grenzen ab, 
-    damit der Zoom immer exakt zentriert ist - egal bei welchem Kameramodell.
-    """
     max_crop = cam2.camera_properties.get("ScalerCropMaximum")
-    
     if max_crop is not None:
         sensor_x, sensor_y, sensor_w, sensor_h = max_crop
     else:
-        # Fallback, falls die Kamera Eigenschaft nicht meldet
         sensor_x, sensor_y, sensor_w, sensor_h = (0, 0, 2592, 1944) 
         
-    # Wir wollen 3:4 Hochformat. Die maximale Höhe bestimmt die Breite.
     base_crop_h = sensor_h
     base_crop_w = int(sensor_h * 0.75) 
     
-    # Zoom anwenden
     crop_w = int(base_crop_w / zoom_factor)
     crop_h = int(base_crop_h / zoom_factor)
     
-    # Exakte Mitte des physischen Sensors bestimmen
     center_x = sensor_x + (sensor_w / 2.0)
     center_y = sensor_y + (sensor_h / 2.0)
     
-    # Kasten um die Mitte aufziehen
     crop_x = int(center_x - (crop_w / 2.0))
     crop_y = int(center_y - (crop_h / 2.0))
     
     cam2.set_controls({"ScalerCrop": (crop_x, crop_y, crop_w, crop_h)})
 
 def set_camera_resolution(idx, current_zoom):
-    """Stoppt die Kamera kurz, ändert die Auflösung und startet neu."""
     w, h = RESOLUTIONS[idx]
-    
     try:
         picam2.stop()
     except:
@@ -144,15 +160,10 @@ def set_camera_resolution(idx, current_zoom):
     picam2.configure(config)
     picam2.start()
     
-    # KURZE PAUSE: Zwingend erforderlich, damit der Autofokus-Befehl 
-    # nicht ins Leere läuft, während der Sensor noch bootet.
     pygame.time.wait(300)
-    
-    # Autofokus und Zoom nach dem Neustart wiederherstellen
     picam2.set_controls({"AfMode": 2})
     apply_zoom(picam2, current_zoom)
 
-# Initialisierung der Kamera mit gespeicherten Werten
 zoom_level = load_zoom()
 current_res_idx = load_res_idx()
 set_camera_resolution(current_res_idx, zoom_level)
@@ -172,6 +183,8 @@ def check_barcode(barcode):
     return False
 
 def mark_barcode_processed(barcode):
+    if not os.path.exists(CSV_FILE):
+        return
     rows = []
     with open(CSV_FILE, mode='r', newline='', encoding='utf-8-sig') as file:
         for row in csv.reader(file):
@@ -200,12 +213,28 @@ def get_pygame_frame():
     surface = pygame.transform.rotate(surface, 180)
     return pygame.transform.smoothscale(surface, (display_w, display_h))
 
+def save_and_finish_picture(barcode, manual_mode):
+    draw_centered_text(TEXT_SAVING)
+    target_path = os.path.join(SAVE_DIR, f"{barcode}.jpg")
+    
+    if manual_mode and os.path.exists(target_path):
+        os.remove(target_path)
+        
+    shutil.move(TEMP_IMG, target_path)
+    
+    if not manual_mode:
+        mark_barcode_processed(barcode)
+        
+    draw_centered_text(TEXT_DONE, color=(50, 255, 50))
+    pygame.time.wait(3000)
+
 # ==========================================
 # HAUPTPROGRAMM (STATE MACHINE)
 # ==========================================
 state = "WAITING"
 barcode_buffer = ""
 current_barcode = None
+manual_mode_active = False
 btn_retake_rect = None
 btn_accept_rect = None
 
@@ -216,7 +245,7 @@ except:
     overlay_surface = None
 
 running = True
-draw_centered_text("Willkommen!\nBitte scanne deinen Barcode.")
+draw_centered_text(TEXT_WELCOME)
 
 while running:
     for event in pygame.event.get():
@@ -228,9 +257,24 @@ while running:
                 running = False
 
             if state == "WAITING":
+                # NEU: Shutdown-Funktion mit 's'
+                if event.key == pygame.K_s:
+                    draw_centered_text(TEXT_SHUTDOWN, color=(255, 50, 50))
+                    pygame.time.wait(2000)
+                    os.system("sudo shutdown now")
+                    running = False
+                    continue
+
                 if event.key == pygame.K_z:
                     state = "ZOOM_MODE"
                     barcode_buffer = ""
+                    continue
+
+                if event.key == pygame.K_r and not barcode_buffer:
+                    state = "MANUAL_ENTRY"
+                    manual_mode_active = True
+                    barcode_buffer = ""
+                    draw_centered_text(TEXT_MANUAL_START, color=(200, 200, 255))
                     continue
 
                 if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
@@ -240,30 +284,44 @@ while running:
                         
                     if check_barcode(scanned_code):
                         current_barcode = scanned_code
-                        draw_centered_text(f"Code [{current_barcode}] erkannt!\nMach dich bereit...", color=(50, 255, 50))
+                        manual_mode_active = False
+                        draw_centered_text(TEXT_CODE_ACCEPTED.format(current_barcode), color=(50, 255, 50))
                         pygame.time.wait(1500)
                         state = "COUNTDOWN"
                     else:
-                        draw_centered_text(f"Gelesen: [{scanned_code}]\nUngültig oder schon benutzt!", color=(255, 50, 50))
+                        draw_centered_text(TEXT_CODE_INVALID.format(scanned_code), color=(255, 50, 50))
                         pygame.time.wait(2500)
-                        draw_centered_text("Willkommen!\nBitte scanne deinen Barcode.")
+                        draw_centered_text(TEXT_WELCOME)
                 else:
                     if event.unicode.isprintable():
                         barcode_buffer += event.unicode
 
+            elif state == "MANUAL_ENTRY":
+                if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    if barcode_buffer.strip():
+                        current_barcode = barcode_buffer.strip()
+                        barcode_buffer = ""
+                        draw_centered_text(TEXT_MANUAL_ACCEPTED.format(current_barcode), color=(50, 255, 50))
+                        pygame.time.wait(1500)
+                        state = "COUNTDOWN"
+                elif event.key == pygame.K_BACKSPACE:
+                    barcode_buffer = barcode_buffer[:-1]
+                    draw_centered_text(TEXT_MANUAL_INPUT.format(barcode_buffer), color=(200, 200, 255))
+                else:
+                    if event.unicode.isnumeric():
+                        barcode_buffer += event.unicode
+                        draw_centered_text(TEXT_MANUAL_INPUT.format(barcode_buffer), color=(200, 200, 255))
+
             elif state == "REVIEW":
                 if event.key == KEY_ACCEPT:
-                    draw_centered_text("Bild wird gespeichert...")
-                    os.rename(TEMP_IMG, os.path.join(SAVE_DIR, f"{current_barcode}.jpg"))
-                    mark_barcode_processed(current_barcode)
-                    draw_centered_text("Fertig!\nVielen Dank.", color=(50, 255, 50))
-                    pygame.time.wait(3000)
+                    save_and_finish_picture(current_barcode, manual_mode_active)
                     current_barcode = None
+                    manual_mode_active = False
                     state = "WAITING"
-                    draw_centered_text("Willkommen!\nBitte scanne deinen Barcode.")
+                    draw_centered_text(TEXT_WELCOME)
                     
                 elif event.key == KEY_RETAKE:
-                    draw_centered_text("Neuer Versuch...")
+                    draw_centered_text(TEXT_RETAKE_MSG)
                     pygame.time.wait(1000)
                     state = "COUNTDOWN"
 
@@ -271,16 +329,13 @@ while running:
             if state == "REVIEW":
                 pos_x, pos_y = event.pos if event.type == pygame.MOUSEBUTTONDOWN else (int(event.x * SCREEN_WIDTH), int(event.y * SCREEN_HEIGHT))
                 if btn_accept_rect and btn_accept_rect.collidepoint(pos_x, pos_y):
-                    draw_centered_text("Bild wird gespeichert...")
-                    os.rename(TEMP_IMG, os.path.join(SAVE_DIR, f"{current_barcode}.jpg"))
-                    mark_barcode_processed(current_barcode)
-                    draw_centered_text("Fertig!\nVielen Dank.", color=(50, 255, 50))
-                    pygame.time.wait(3000)
+                    save_and_finish_picture(current_barcode, manual_mode_active)
                     current_barcode = None
+                    manual_mode_active = False
                     state = "WAITING"
-                    draw_centered_text("Willkommen!\nBitte scanne deinen Barcode.")
+                    draw_centered_text(TEXT_WELCOME)
                 elif btn_retake_rect and btn_retake_rect.collidepoint(pos_x, pos_y):
-                    draw_centered_text("Neuer Versuch...")
+                    draw_centered_text(TEXT_RETAKE_MSG)
                     pygame.time.wait(1000)
                     state = "COUNTDOWN"
 
@@ -294,7 +349,7 @@ while running:
         menu_lines = [
             f"Zoom: {zoom_level:.1f}x  (P: +, M: -)",
             f"Auflösung: Stufe {current_res_idx + 1}/5 [{res_w}x{res_h}]  (H: +, L: -)",
-            "Z: Speichern & Beenden"
+            TEXT_MENU_SAVE
         ]
 
         text_surfaces = [font_medium.render(txt, True, (255, 255, 255)) for txt in menu_lines]
@@ -323,7 +378,7 @@ while running:
                     save_zoom(zoom_level)
                     save_res_idx(current_res_idx)
                     state = "WAITING"
-                    draw_centered_text("Willkommen!\nBitte scanne deinen Barcode.")
+                    draw_centered_text(TEXT_WELCOME)
                 elif ev.key == pygame.K_p: 
                     zoom_level = min(4.0, zoom_level + 0.1)
                     apply_zoom(picam2, zoom_level)
@@ -384,12 +439,12 @@ while running:
                 pygame.draw.rect(screen, (200, 50, 50), btn_retake_rect, border_radius=10)
                 pygame.draw.rect(screen, (50, 200, 50), btn_accept_rect, border_radius=10)
                 
-                screen.blit(font_medium.render("Neuaufnahme", True, (255, 255, 255)), font_medium.render("Neuaufnahme", True, (255, 255, 255)).get_rect(center=btn_retake_rect.center))
-                screen.blit(font_medium.render("Speichern", True, (255, 255, 255)), font_medium.render("Speichern", True, (255, 255, 255)).get_rect(center=btn_accept_rect.center))
+                screen.blit(font_medium.render(BTN_RETAKE, True, (255, 255, 255)), font_medium.render(BTN_RETAKE, True, (255, 255, 255)).get_rect(center=btn_retake_rect.center))
+                screen.blit(font_medium.render(BTN_SAVE, True, (255, 255, 255)), font_medium.render(BTN_SAVE, True, (255, 255, 255)).get_rect(center=btn_accept_rect.center))
                 
                 pygame.display.update()
             except Exception as e:
-                draw_centered_text("Fehler bei der Bildanzeige.")
+                draw_centered_text(TEXT_ERROR)
                 
             state = "REVIEW"
 
